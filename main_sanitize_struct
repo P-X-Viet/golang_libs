@@ -1,0 +1,222 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"net/http"
+	"reflect"
+	"github.com/labstack/echo/v4"
+)
+
+// FindInvalidFloats recursively finds all fields with Inf or NaN values
+func FindInvalidFloats(v interface{}, path string) []string {
+	var problems []string
+	val := reflect.ValueOf(v)
+	
+	// Handle pointers
+	if val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return problems
+		}
+		val = val.Elem()
+	}
+	
+	switch val.Kind() {
+	case reflect.Struct:
+		typ := val.Type()
+		for i := 0; i < val.NumField(); i++ {
+			field := val.Field(i)
+			fieldType := typ.Field(i)
+			
+			// Skip unexported fields
+			if !field.CanInterface() {
+				continue
+			}
+			
+			fieldPath := path + "." + fieldType.Name
+			problems = append(problems, FindInvalidFloats(field.Interface(), fieldPath)...)
+		}
+		
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < val.Len(); i++ {
+			item := val.Index(i)
+			itemPath := fmt.Sprintf("%s[%d]", path, i)
+			problems = append(problems, FindInvalidFloats(item.Interface(), itemPath)...)
+		}
+		
+	case reflect.Map:
+		iter := val.MapRange()
+		for iter.Next() {
+			k := iter.Key()
+			v := iter.Value()
+			mapPath := fmt.Sprintf("%s[%v]", path, k.Interface())
+			problems = append(problems, FindInvalidFloats(v.Interface(), mapPath)...)
+		}
+		
+	case reflect.Float32, reflect.Float64:
+		f := val.Float()
+		if math.IsInf(f, 0) {
+			problems = append(problems, fmt.Sprintf("%s = +Inf", path))
+		} else if math.IsInf(f, -1) {
+			problems = append(problems, fmt.Sprintf("%s = -Inf", path))
+		} else if math.IsNaN(f) {
+			problems = append(problems, fmt.Sprintf("%s = NaN", path))
+		}
+	}
+	
+	return problems
+}
+
+// SanitizeFloats recursively replaces all Inf/NaN with 0 (or other value)
+func SanitizeFloats(v interface{}) {
+	val := reflect.ValueOf(v)
+	
+	// Must be pointer to modify
+	if val.Kind() != reflect.Ptr {
+		return
+	}
+	
+	val = val.Elem()
+	
+	switch val.Kind() {
+	case reflect.Struct:
+		for i := 0; i < val.NumField(); i++ {
+			field := val.Field(i)
+			if field.CanSet() && field.CanAddr() {
+				SanitizeFloats(field.Addr().Interface())
+			}
+		}
+		
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < val.Len(); i++ {
+			item := val.Index(i)
+			if item.CanAddr() {
+				SanitizeFloats(item.Addr().Interface())
+			}
+		}
+		
+	case reflect.Map:
+		// Maps need special handling - can't take address of map values
+		iter := val.MapRange()
+		for iter.Next() {
+			k := iter.Key()
+			v := iter.Value()
+			if v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64 {
+				f := v.Float()
+				if math.IsInf(f, 0) || math.IsNaN(f) {
+					val.SetMapIndex(k, reflect.ValueOf(0.0))
+				}
+			}
+		}
+		
+	case reflect.Float32, reflect.Float64:
+		if val.CanSet() {
+			f := val.Float()
+			if math.IsInf(f, 0) || math.IsNaN(f) {
+				val.SetFloat(0) // Replace with 0
+			}
+		}
+	}
+}
+
+// Example nested structs
+type Address struct {
+	Street  string
+	ZipCode string
+	GeoLat  float64
+	GeoLong float64
+}
+
+type Stats struct {
+	Average float64
+	Max     float64
+	Min     float64
+	Ratio   float64
+}
+
+type Person struct {
+	Name    string
+	Age     int
+	Address Address
+	Stats   Stats
+	Scores  []float64
+}
+
+type Response struct {
+	Data    []Person
+	Summary map[string]float64
+}
+
+func main() {
+	e := echo.New()
+
+	e.GET("/data", func(c echo.Context) error {
+		// Sample data with hidden Inf values
+		response := Response{
+			Data: []Person{
+				{
+					Name: "John",
+					Age:  30,
+					Address: Address{
+						Street:  "123 Main St",
+						GeoLat:  40.7128,
+						GeoLong: math.Inf(1), // Hidden problem!
+					},
+					Stats: Stats{
+						Average: 85.5,
+						Max:     100,
+						Min:     70,
+						Ratio:   10.0 / 0.0, // Another problem!
+					},
+					Scores: []float64{85, 90, math.Inf(-1), 88}, // And another!
+				},
+			},
+			Summary: map[string]float64{
+				"total":   100,
+				"average": math.NaN(), // And another!
+			},
+		}
+
+		// Option 1: Find problems (for debugging)
+		problems := FindInvalidFloats(response, "response")
+		if len(problems) > 0 {
+			fmt.Println("Found invalid float values:")
+			for _, p := range problems {
+				fmt.Println("  -", p)
+			}
+		}
+
+		// Option 2: Sanitize and return
+		SanitizeFloats(&response)
+		
+		return c.JSON(http.StatusOK, response)
+	})
+
+	// Middleware to catch JSON marshal errors
+	e.GET("/data-with-detection", func(c echo.Context) error {
+		response := Response{
+			Data: []Person{
+				{
+					Name: "Jane",
+					Stats: Stats{
+						Ratio: math.Inf(1),
+					},
+				},
+			},
+		}
+
+		// First, check for problems
+		problems := FindInvalidFloats(response, "response")
+		if len(problems) > 0 {
+			// Log or return error with details
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"error":   "Invalid float values detected",
+				"details": problems,
+			})
+		}
+
+		return c.JSON(http.StatusOK, response)
+	})
+
+	e.Logger.Fatal(e.Start(":8080"))
+}
