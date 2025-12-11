@@ -1,0 +1,172 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"time"
+)
+
+// BoundingBox defines the geographical boundary
+type BoundingBox struct {
+	MinLat float64 // Lower-left latitude
+	MinLon float64 // Lower-left longitude
+	MaxLat float64 // Upper-right latitude
+	MaxLon float64 // Upper-right longitude
+}
+
+// Position represents a GPS coordinate
+type Position struct {
+	Lat float64
+	Lon float64
+}
+
+// VehicleSimulator handles vehicle movement simulation
+type VehicleSimulator struct {
+	VehicleType int
+	BBox        BoundingBox
+	CurrentPos  Position
+	rand        *rand.Rand
+}
+
+// NewVehicleSimulator creates a new vehicle simulator
+func NewVehicleSimulator(vehicleType int, bbox BoundingBox, startPos Position) *VehicleSimulator {
+	return &VehicleSimulator{
+		VehicleType: vehicleType,
+		BBox:        bbox,
+		CurrentPos:  startPos,
+		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+// getDistanceByType returns distance in meters based on vehicle type
+func (vs *VehicleSimulator) getDistanceByType() float64 {
+	switch vs.VehicleType {
+	case 1:
+		return 10.0 // 10 meters
+	case 2:
+		return 2.0 // 2 meters
+	case 3:
+		return 5.0 // 5 meters
+	case 4:
+		return 15.0 // 15 meters
+	default:
+		return 10.0
+	}
+}
+
+// moveToNewPosition generates next position within bounding box
+func (vs *VehicleSimulator) moveToNewPosition() Position {
+	distance := vs.getDistanceByType()
+	
+	// Generate random bearing (0-360 degrees)
+	bearing := vs.rand.Float64() * 360.0
+	
+	// Try to move in the random direction
+	newPos := vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
+	
+	// If new position is outside bounds, try alternative directions
+	attempts := 0
+	maxAttempts := 8
+	
+	for !vs.isWithinBounds(newPos) && attempts < maxAttempts {
+		// Try different bearings to find valid position
+		bearing = vs.rand.Float64() * 360.0
+		newPos = vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
+		attempts++
+	}
+	
+	// If still outside bounds, move towards center instead
+	if !vs.isWithinBounds(newPos) {
+		centerLat := (vs.BBox.MinLat + vs.BBox.MaxLat) / 2
+		centerLon := (vs.BBox.MinLon + vs.BBox.MaxLon) / 2
+		bearing = vs.calculateBearing(vs.CurrentPos, Position{Lat: centerLat, Lon: centerLon})
+		newPos = vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
+	}
+	
+	// Clamp to boundaries as final safeguard
+	newPos.Lat = math.Max(vs.BBox.MinLat, math.Min(vs.BBox.MaxLat, newPos.Lat))
+	newPos.Lon = math.Max(vs.BBox.MinLon, math.Min(vs.BBox.MaxLon, newPos.Lon))
+	
+	vs.CurrentPos = newPos
+	return newPos
+}
+
+// calculateNewPosition computes new lat/lon given distance and bearing
+func (vs *VehicleSimulator) calculateNewPosition(pos Position, distanceMeters float64, bearingDegrees float64) Position {
+	earthRadiusMeters := 6371000.0
+	
+	// Convert to radians
+	lat1 := pos.Lat * math.Pi / 180.0
+	lon1 := pos.Lon * math.Pi / 180.0
+	bearingRad := bearingDegrees * math.Pi / 180.0
+	
+	// Calculate new position using Haversine formula
+	angularDistance := distanceMeters / earthRadiusMeters
+	
+	lat2 := math.Asin(math.Sin(lat1)*math.Cos(angularDistance) +
+		math.Cos(lat1)*math.Sin(angularDistance)*math.Cos(bearingRad))
+	
+	lon2 := lon1 + math.Atan2(
+		math.Sin(bearingRad)*math.Sin(angularDistance)*math.Cos(lat1),
+		math.Cos(angularDistance)-math.Sin(lat1)*math.Sin(lat2))
+	
+	// Convert back to degrees
+	return Position{
+		Lat: lat2 * 180.0 / math.Pi,
+		Lon: lon2 * 180.0 / math.Pi,
+	}
+}
+
+// calculateBearing calculates bearing from pos1 to pos2
+func (vs *VehicleSimulator) calculateBearing(pos1, pos2 Position) float64 {
+	lat1 := pos1.Lat * math.Pi / 180.0
+	lat2 := pos2.Lat * math.Pi / 180.0
+	lonDiff := (pos2.Lon - pos1.Lon) * math.Pi / 180.0
+	
+	y := math.Sin(lonDiff) * math.Cos(lat2)
+	x := math.Cos(lat1)*math.Sin(lat2) - math.Sin(lat1)*math.Cos(lat2)*math.Cos(lonDiff)
+	bearing := math.Atan2(y, x)
+	
+	return math.Mod(bearing*180.0/math.Pi+360.0, 360.0)
+}
+
+// isWithinBounds checks if position is within bounding box
+func (vs *VehicleSimulator) isWithinBounds(pos Position) bool {
+	return pos.Lat >= vs.BBox.MinLat && pos.Lat <= vs.BBox.MaxLat &&
+		pos.Lon >= vs.BBox.MinLon && pos.Lon <= vs.BBox.MaxLon
+}
+
+// GenerateNextPosition is the main function to call for getting next position
+func (vs *VehicleSimulator) GenerateNextPosition() Position {
+	return vs.moveToNewPosition()
+}
+
+// Example usage
+func main() {
+	// Define bounding box (example: area in Hanoi)
+	bbox := BoundingBox{
+		MinLat: 21.0000, // Lower-left
+		MinLon: 105.8000,
+		MaxLat: 21.0500, // Upper-right
+		MaxLon: 105.8500,
+	}
+	
+	// Starting position (center of bounding box)
+	startPos := Position{
+		Lat: (bbox.MinLat + bbox.MaxLat) / 2,
+		Lon: (bbox.MinLon + bbox.MaxLon) / 2,
+	}
+	
+	// Create simulator for vehicle type 1 (moves 10m per step)
+	simulator := NewVehicleSimulator(1, bbox, startPos)
+	
+	fmt.Printf("Starting position: Lat=%.6f, Lon=%.6f\n", startPos.Lat, startPos.Lon)
+	
+	// Generate 10 position updates
+	for i := 1; i <= 10; i++ {
+		newPos := simulator.GenerateNextPosition()
+		fmt.Printf("Position %d: Lat=%.6f, Lon=%.6f\n", i, newPos.Lat, newPos.Lon)
+		time.Sleep(1 * time.Second) // Simulate time between updates
+	}
+}
