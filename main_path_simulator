@@ -23,19 +23,22 @@ type Position struct {
 
 // VehicleSimulator handles vehicle movement simulation
 type VehicleSimulator struct {
-	VehicleType int
-	BBox        BoundingBox
-	CurrentPos  Position
-	rand        *rand.Rand
+	VehicleType    int
+	BBox           BoundingBox
+	CurrentPos     Position
+	CurrentBearing float64 // Track current bearing
+	rand           *rand.Rand
 }
 
 // NewVehicleSimulator creates a new vehicle simulator
 func NewVehicleSimulator(vehicleType int, bbox BoundingBox, startPos Position) *VehicleSimulator {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &VehicleSimulator{
-		VehicleType: vehicleType,
-		BBox:        bbox,
-		CurrentPos:  startPos,
-		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		VehicleType:    vehicleType,
+		BBox:           bbox,
+		CurrentPos:     startPos,
+		CurrentBearing: r.Float64() * 360.0, // Random initial bearing
+		rand:           r,
 	}
 }
 
@@ -55,32 +58,61 @@ func (vs *VehicleSimulator) getDistanceByType() float64 {
 	}
 }
 
+// generateNewBearing generates a new bearing within 30 degrees of current bearing
+func (vs *VehicleSimulator) generateNewBearing() float64 {
+	// Random change between -30 and +30 degrees
+	bearingChange := (vs.rand.Float64() * 60.0) - 30.0
+	newBearing := vs.CurrentBearing + bearingChange
+	
+	// Normalize to 0-360 range
+	newBearing = math.Mod(newBearing+360.0, 360.0)
+	
+	return newBearing
+}
+
 // moveToNewPosition generates next position within bounding box
 func (vs *VehicleSimulator) moveToNewPosition() Position {
 	distance := vs.getDistanceByType()
 	
-	// Generate random bearing (0-360 degrees)
-	bearing := vs.rand.Float64() * 360.0
+	// Generate new bearing within 30 degrees of current bearing
+	bearing := vs.generateNewBearing()
 	
-	// Try to move in the random direction
+	// Try to move in the new direction
 	newPos := vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
 	
-	// If new position is outside bounds, try alternative directions
+	// If new position is outside bounds, try alternative bearings
 	attempts := 0
-	maxAttempts := 8
+	maxAttempts := 12
 	
 	for !vs.isWithinBounds(newPos) && attempts < maxAttempts {
-		// Try different bearings to find valid position
-		bearing = vs.rand.Float64() * 360.0
+		// Try smaller bearing changes to stay within bounds
+		bearingChange := (vs.rand.Float64() * 60.0) - 30.0
+		bearing = vs.CurrentBearing + bearingChange
+		bearing = math.Mod(bearing+360.0, 360.0)
+		
 		newPos = vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
 		attempts++
 	}
 	
-	// If still outside bounds, move towards center instead
+	// If still outside bounds, calculate bearing towards center with adjustment
 	if !vs.isWithinBounds(newPos) {
 		centerLat := (vs.BBox.MinLat + vs.BBox.MaxLat) / 2
 		centerLon := (vs.BBox.MinLon + vs.BBox.MaxLon) / 2
-		bearing = vs.calculateBearing(vs.CurrentPos, Position{Lat: centerLat, Lon: centerLon})
+		bearingToCenter := vs.calculateBearing(vs.CurrentPos, Position{Lat: centerLat, Lon: centerLon})
+		
+		// Adjust current bearing gradually towards center (within 30 degree constraint)
+		bearingDiff := vs.angleDifference(vs.CurrentBearing, bearingToCenter)
+		if math.Abs(bearingDiff) > 30.0 {
+			if bearingDiff > 0 {
+				bearing = vs.CurrentBearing + 30.0
+			} else {
+				bearing = vs.CurrentBearing - 30.0
+			}
+		} else {
+			bearing = bearingToCenter
+		}
+		bearing = math.Mod(bearing+360.0, 360.0)
+		
 		newPos = vs.calculateNewPosition(vs.CurrentPos, distance, bearing)
 	}
 	
@@ -88,8 +120,26 @@ func (vs *VehicleSimulator) moveToNewPosition() Position {
 	newPos.Lat = math.Max(vs.BBox.MinLat, math.Min(vs.BBox.MaxLat, newPos.Lat))
 	newPos.Lon = math.Max(vs.BBox.MinLon, math.Min(vs.BBox.MaxLon, newPos.Lon))
 	
+	// Update current bearing for next iteration
+	vs.CurrentBearing = bearing
 	vs.CurrentPos = newPos
+	
 	return newPos
+}
+
+// angleDifference calculates the shortest angle difference between two bearings
+func (vs *VehicleSimulator) angleDifference(bearing1, bearing2 float64) float64 {
+	diff := bearing2 - bearing1
+	
+	// Normalize to -180 to 180
+	for diff > 180.0 {
+		diff -= 360.0
+	}
+	for diff < -180.0 {
+		diff += 360.0
+	}
+	
+	return diff
 }
 
 // calculateNewPosition computes new lat/lon given distance and bearing
@@ -142,6 +192,11 @@ func (vs *VehicleSimulator) GenerateNextPosition() Position {
 	return vs.moveToNewPosition()
 }
 
+// GetCurrentBearing returns the current bearing
+func (vs *VehicleSimulator) GetCurrentBearing() float64 {
+	return vs.CurrentBearing
+}
+
 // Example usage
 func main() {
 	// Define bounding box (example: area in Hanoi)
@@ -161,12 +216,20 @@ func main() {
 	// Create simulator for vehicle type 1 (moves 10m per step)
 	simulator := NewVehicleSimulator(1, bbox, startPos)
 	
-	fmt.Printf("Starting position: Lat=%.6f, Lon=%.6f\n", startPos.Lat, startPos.Lon)
+	fmt.Printf("Starting position: Lat=%.6f, Lon=%.6f, Bearing=%.2f°\n", 
+		startPos.Lat, startPos.Lon, simulator.GetCurrentBearing())
 	
 	// Generate 10 position updates
+	prevBearing := simulator.GetCurrentBearing()
 	for i := 1; i <= 10; i++ {
 		newPos := simulator.GenerateNextPosition()
-		fmt.Printf("Position %d: Lat=%.6f, Lon=%.6f\n", i, newPos.Lat, newPos.Lon)
+		currentBearing := simulator.GetCurrentBearing()
+		bearingChange := simulator.angleDifference(prevBearing, currentBearing)
+		
+		fmt.Printf("Position %d: Lat=%.6f, Lon=%.6f, Bearing=%.2f° (change: %+.2f°)\n", 
+			i, newPos.Lat, newPos.Lon, currentBearing, bearingChange)
+		
+		prevBearing = currentBearing
 		time.Sleep(1 * time.Second) // Simulate time between updates
 	}
 }
