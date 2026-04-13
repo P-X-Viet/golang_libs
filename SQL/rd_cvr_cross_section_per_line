@@ -1,0 +1,53 @@
+query := `
+WITH params AS (
+    SELECT
+        ST_SetSRID(ST_MakePoint(?, ?), 4326)  AS center_pt,
+        ?::FLOAT                               AS distance_m,
+        ?::FLOAT                               AS bearing_deg,
+        ?::INT                                 AS num_samples
+),
+endpoints AS (
+    SELECT
+        ST_Project(center_pt::GEOGRAPHY, distance_m, RADIANS(bearing_deg)      )::GEOMETRY AS pt_a,
+        ST_Project(center_pt::GEOGRAPHY, distance_m, RADIANS(bearing_deg + 180))::GEOMETRY AS pt_b
+    FROM params
+),
+transect AS (
+    SELECT ST_SetSRID(ST_MakeLine(pt_a, pt_b), 4326) AS line
+    FROM endpoints
+),
+sample_points AS (
+    SELECT
+        i,
+        ST_LineInterpolatePoint(
+            line,
+            CASE num_samples
+                WHEN 1 THEN 0.5
+                ELSE (i - 1.0) / (num_samples - 1.0)
+            END
+        ) AS geom
+    FROM transect, params, GENERATE_SERIES(1, num_samples) AS i
+),
+raster_values AS (
+    SELECT
+        sp.i                         AS sample_index,
+        sp.geom                      AS sample_geom,
+        ST_X(sp.geom)                AS lon,
+        ST_Y(sp.geom)                AS lat,
+        ST_Value(r.rast, 1, sp.geom) AS pixel_value
+    FROM sample_points sp
+    JOIN your_raster_table r
+      ON ST_Intersects(r.rast, sp.geom)
+)
+SELECT * FROM raster_values
+ORDER BY sample_index;
+`
+
+// Usage
+rows, err := db.Raw(query,
+    106.7,  // $1 center longitude
+    10.8,   // $2 center latitude
+    500.0,  // $3 distance_m (half-length in meters)
+    90.0,   // $4 bearing_deg
+    20,     // $5 num_samples
+).Rows()
